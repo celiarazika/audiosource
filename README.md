@@ -46,6 +46,19 @@ Options for `run`:
   example `--latency 60`, if the sound crackles over Wi-Fi.
 - `--hostapi WASAPI|DirectSound|MME`: force a Windows audio API. By default the
   lowest-latency one (WASAPI) is tried first, then the others.
+- `--once`: stop when the connection drops. By default the client reconnects
+  automatically until you press Ctrl+C.
+
+### Wi-Fi
+
+Android's _Wireless debugging_ changes port and may turn itself off when the
+phone sleeps (notably on Xiaomi/HyperOS). A fixed port is more reliable:
+
+1. Connect the phone by USB once and run `adb tcpip 5555`.
+2. Unplug it and run `python audiosource.py run --connect PHONE_IP`.
+
+The client then reconnects by itself after Wi-Fi drops. The fixed port lasts
+until the phone reboots; repeat step 1 after a reboot.
 - `--port N`: local TCP port used by `adb forward` (default: `34567`).
 
 Use `-s SERIAL` before the command to select a device when several are connected.

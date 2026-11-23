@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 PKG = "fr.dzx.audiosource"
 ACTIVITY = f"{PKG}/.MainActivity"
@@ -32,6 +33,10 @@ SAMPLE_BYTES = 2  # s16
 CHUNK = 1024 * SAMPLE_BYTES
 DEFAULT_PORT = 34567
 DEFAULT_DEVICE = "CABLE Input"
+DEFAULT_TCPIP_PORT = 5555
+RETRY_DELAY = 2  # seconds between reconnection attempts
+STALL_TIMEOUT = 5  # seconds without audio before the link is considered dead
+ADB_TIMEOUT = 15  # seconds before an adb command is considered hung
 PERMISSIONS = [
     "android.permission.POST_NOTIFICATIONS",
     "android.permission.RECORD_AUDIO",
@@ -50,13 +55,37 @@ def adb_cmd(serial, *args):
     return cmd + list(args)
 
 
-def run_adb(serial, *args, capture=False):
-    return subprocess.run(
-        adb_cmd(serial, *args),
-        check=False,
-        capture_output=capture,
-        text=capture,
-    )
+class Retry(Exception):
+    """A transient failure (phone gone, Wi-Fi drop...): try again."""
+
+
+def run_adb(serial, *args, capture=False, timeout=None):
+    try:
+        return subprocess.run(
+            adb_cmd(serial, *args),
+            check=False,
+            capture_output=capture,
+            text=capture,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise Retry(f"'adb {' '.join(args)}' timed out after {timeout} s")
+
+
+def adb_ok(serial, *args, timeout=ADB_TIMEOUT):
+    """Run adb; raise Retry if it fails or hangs."""
+    r = run_adb(serial, *args, capture=True, timeout=timeout)
+    if r.returncode != 0:
+        raise Retry(f"'adb {' '.join(args)}' failed: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def remove_forward(args):
+    try:
+        run_adb(args.serial, "forward", "--remove", f"tcp:{args.port}",
+                capture=True, timeout=5)
+    except Retry:
+        pass
 
 
 def check_adb():
@@ -66,15 +95,17 @@ def check_adb():
 
 def check_permissions(serial):
     """Grant the required permissions. Return True if all are granted."""
-    dumpsys = run_adb(serial, "exec-out", "dumpsys", "package", PKG, capture=True)
-    if dumpsys.returncode != 0:
-        die("could not query the Audio Source package. Is the app installed?")
+    dumpsys = run_adb(serial, "exec-out", "dumpsys", "package", PKG,
+                      capture=True, timeout=ADB_TIMEOUT)
+    if dumpsys.returncode != 0 or PKG not in dumpsys.stdout:
+        raise Retry("could not query the Audio Source package. Is the app installed?")
 
     ok = True
     for perm in PERMISSIONS:
         granted = f"{perm}: granted=true" in dumpsys.stdout
         if not granted:
-            granted = run_adb(serial, "exec-out", "pm", "grant", PKG, perm).returncode == 0
+            granted = run_adb(serial, "exec-out", "pm", "grant", PKG, perm,
+                              capture=True, timeout=ADB_TIMEOUT).returncode == 0
         print(f"{perm}: granted={'true' if granted else 'false'}")
         ok = ok and granted
     return ok
@@ -186,18 +217,59 @@ def cmd_run(args):
         f"latency {stream.latency * 1000:.0f} ms"
     )
 
-    if args.serial:
-        listed = run_adb("", "devices", capture=True).stdout.splitlines()[1:]
-        serials = [line.split()[0] for line in listed if line.strip()]
-        if args.serial not in serials:
-            print(f"[!] '{args.serial}' is not in 'adb devices'. Connected devices:")
-            for s in serials or ["(none)"]:
-                print(f"      {s}")
-            print("    Use one of these names with -s, or omit -s if only one is connected.")
-            print("    (The port shown by 'adb pair' is only for pairing, not for -s.)")
+    if args.connect:
+        # Over Wi-Fi, always address the phone by IP:port so that a USB
+        # connection of the same phone does not make adb ambiguous.
+        if ":" not in args.connect:
+            args.connect = f"{args.connect}:{DEFAULT_TCPIP_PORT}"
+        args.serial = args.serial or args.connect
+    elif args.serial:
+        warn_unknown_serial(args.serial)
+
+    stream.start()  # plays silence until the phone sends audio
+    try:
+        while True:
+            try:
+                stream_session(args, stream)
+            except (Retry, OSError) as e:
+                print(f"[!] {e}")
+            finally:
+                remove_forward(args)
+            if args.once:
+                break
+            print(f"[+] Reconnecting in {RETRY_DELAY} s (Ctrl+C to stop)")
+            time.sleep(RETRY_DELAY)
+    except KeyboardInterrupt:
+        print("\n[+] Stopped")
+    finally:
+        remove_forward(args)
+        stream.stop()
+        stream.close()
+    return 0
+
+
+def warn_unknown_serial(serial):
+    listed = run_adb("", "devices", capture=True, timeout=ADB_TIMEOUT).stdout
+    serials = [line.split()[0] for line in listed.splitlines()[1:] if line.strip()]
+    if serial not in serials:
+        print(f"[!] '{serial}' is not in 'adb devices'. Connected devices:")
+        for s in serials or ["(none)"]:
+            print(f"      {s}")
+        print("    Use one of these names with -s, or omit -s if only one is connected.")
+        print("    (The port shown by 'adb pair' is only for pairing, not for -s.)")
+
+
+def stream_session(args, stream):
+    """Connect to the phone and stream until the link drops (raises Retry)."""
+    if args.connect:
+        print(f"[+] Connecting to {args.connect}")
+        r = adb_ok("", "connect", args.connect, timeout=10)
+        # `adb connect` exits with 0 even when it fails.
+        if "connected to" not in r.stdout:
+            raise Retry(r.stdout.strip() or f"could not connect to {args.connect}")
 
     print("[+] Waiting for device", args.serial or "")
-    run_adb(args.serial, "wait-for-device")
+    adb_ok(args.serial, "wait-for-device", timeout=30)
 
     print("[+] Checking permissions")
     if not check_permissions(args.serial):
@@ -207,29 +279,19 @@ def cmd_run(args):
         )
 
     print("[+] Starting Audio Source")
-    run_adb(args.serial, "shell", "am", "start", ACTIVITY)
+    adb_ok(args.serial, "shell", "am", "start", ACTIVITY)
 
     print(f"[+] Forwarding audio to '{args.device}' (port {args.port})")
-    fwd = run_adb(
-        args.serial, "forward", f"tcp:{args.port}", f"localabstract:{SOCKET_NAME}"
-    )
-    if fwd.returncode != 0:
-        die("adb forward failed.")
+    adb_ok(args.serial, "forward", f"tcp:{args.port}", f"localabstract:{SOCKET_NAME}")
+    time.sleep(1)  # give the app time to open its socket
 
-    try:
-        with socket.create_connection(("127.0.0.1", args.port), timeout=10) as sock:
-            sock.settimeout(None)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            with stream:
-                print("[+] Streaming. Press Ctrl+C to stop.")
-                pump(sock, stream, args.gain)
-    except KeyboardInterrupt:
-        print("\n[+] Stopped")
-    except OSError as e:
-        die(f"connection to the phone failed: {e}")
-    finally:
-        run_adb(args.serial, "forward", "--remove", f"tcp:{args.port}")
-    return 0
+    with socket.create_connection(("127.0.0.1", args.port), timeout=10) as sock:
+        # Audio flows continuously: a silence of STALL_TIMEOUT means the link died.
+        sock.settimeout(STALL_TIMEOUT)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        print("[+] Streaming. Press Ctrl+C to stop.")
+        pump(sock, stream, args.gain)
+    raise Retry("the phone closed the audio stream")
 
 
 def cmd_devices(args):
@@ -260,6 +322,12 @@ def build_parser():
     run.add_argument("--latency", type=parse_latency, default="low",
                      help="output latency: 'low', 'high' or milliseconds, e.g. 40 "
                           "(raise it if the sound crackles; default: low)")
+    run.add_argument("--connect", metavar="IP[:PORT]", default=None,
+                     help="Wi-Fi: connect (and reconnect) to the phone at this "
+                          f"address, after 'adb tcpip {DEFAULT_TCPIP_PORT}' over USB "
+                          f"(default port: {DEFAULT_TCPIP_PORT})")
+    run.add_argument("--once", action="store_true",
+                     help="stop when the connection drops instead of reconnecting")
     run.add_argument("--hostapi", default=None,
                      help="force a Windows audio API: WASAPI, DirectSound or MME "
                           "(default: try WASAPI first)")
