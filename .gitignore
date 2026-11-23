@@ -9,3 +9,6 @@
 .externalNativeBuild
 .cxx
 /keystore.properties
+
+# Phone Wi-Fi address remembered by start-mic.ps1
+.phone-ip

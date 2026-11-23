@@ -1,7 +1,14 @@
-# Audio Source
+# Audio Source for Windows and Linux
 
-Audio Source forwards Android microphone audio input to the PulseAudio daemon
-through ADB, so you can use your Android device as a USB microphone.
+> Fork of [gdzx/audiosource](https://github.com/gdzx/audiosource) that adds a
+> **Windows client**: USB or Wi-Fi, low latency, automatic reconnection and a
+> one-click launcher. The Android app and the Linux client are unchanged.
+
+Audio Source forwards Android microphone audio through ADB, so you can use your
+Android device as a USB or Wi-Fi microphone: on Linux through PulseAudio or
+PipeWire, and on Windows through a virtual audio cable (VB-CABLE). It works
+with any application: video calls (Google Meet, Teams, Zoom, Discord), voice
+dictation, OBS...
 
 ![screenshot](assets/screenshot.png)
 
@@ -9,6 +16,7 @@ through ADB, so you can use your Android device as a USB microphone.
 
 - Device with at least Android 4.0 (API level 14), but fully tested only on
   Android 10 (API level 29) so your mileage may vary.
+- Windows 10/11 machine: see [Windows](#windows).
 - GNU/Linux machine with:
   - Android SDK Platform Tools (requires `adb` in `PATH`).
   - PulseAudio or PipeWire with PulseAudio support (requires `pactl` in
@@ -17,29 +25,56 @@ through ADB, so you can use your Android device as a USB microphone.
 
 ## Windows
 
-The `audiosource.py` client works on Windows. It plays the phone's microphone
-audio into a virtual audio cable, which Windows applications can then use as a
-microphone.
+The `audiosource.py` client plays the phone's microphone audio into a virtual
+audio cable, which Windows applications then use as a microphone.
 
-Requirements:
+### Setup (once)
 
-- Android SDK Platform Tools (`adb.exe` in `PATH`).
-- [VB-CABLE](https://vb-audio.com/Cable/) (free virtual audio cable).
-- Python 3, then `pip install sounddevice numpy`.
+1. Install the tools:
+   - Android SDK Platform Tools: `winget install --id Google.PlatformTools`
+   - [VB-CABLE](https://vb-audio.com/Cable/) (free virtual audio cable), then
+     reboot.
+   - [Python 3](https://www.python.org/downloads/) (tick "Add to PATH"). The
+     launcher installs the `sounddevice` and `numpy` packages by itself.
+2. Install the Audio Source app on the phone and enable USB debugging (see
+   [Installation](#installation)).
+3. In `mmsys.cpl`, set both **CABLE Input** (Playback) and **CABLE Output**
+   (Recording) to *2 channels, 16 bit, 48000 Hz*, and make **CABLE Output** the
+   default and default communication device.
 
-Usage (phone connected by USB with USB debugging enabled, and the Audio Source
-app installed as described below):
+### One-click launch (Wi-Fi)
 
-```powershell
-python audiosource.py devices
-python audiosource.py run
+`start-mic.ps1` does everything: it checks the prerequisites, switches the
+phone to Wi-Fi when it is plugged in by USB, remembers its address, then streams
+the microphone with automatic reconnection.
+
+1. Plug the phone in by USB, right-click `start-mic.ps1` and choose
+   **Run with PowerShell**.
+2. When it says so, unplug the cable. The microphone keeps working over Wi-Fi
+   until you close the window.
+
+Next times, just run it again: no cable needed, until the phone reboots (then
+plug it in by USB once more). For a desktop shortcut, use this target:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\path\to\start-mic.ps1"
 ```
 
-Then, in Windows sound settings, set **CABLE Output** as the input (microphone)
-device of the application you want to use.
+Options: `-PhoneIp 192.168.1.50` (address to use, remembered), `-Gain 2.0`,
+`-Latency 60`.
+
+### Command line
+
+```powershell
+python audiosource.py devices                    # list audio outputs
+python audiosource.py run                        # USB
+python audiosource.py run --connect PHONE_IP     # Wi-Fi (after adb tcpip 5555)
+```
 
 Options for `run`:
 
+- `--connect IP[:PORT]`: Wi-Fi mode, reconnects after drops (default port:
+  `5555`).
 - `--device NAME`: output device name substring (default: `CABLE Input`).
 - `--gain 2.0`: volume multiplier if the sound is too low.
 - `--latency low|high|MS`: output buffer (default: `low`). Raise it, for
@@ -48,20 +83,20 @@ Options for `run`:
   lowest-latency one (WASAPI) is tried first, then the others.
 - `--once`: stop when the connection drops. By default the client reconnects
   automatically until you press Ctrl+C.
-
-### Wi-Fi
-
-Android's _Wireless debugging_ changes port and may turn itself off when the
-phone sleeps (notably on Xiaomi/HyperOS). A fixed port is more reliable:
-
-1. Connect the phone by USB once and run `adb tcpip 5555`.
-2. Unplug it and run `python audiosource.py run --connect PHONE_IP`.
-
-The client then reconnects by itself after Wi-Fi drops. The fixed port lasts
-until the phone reboots; repeat step 1 after a reboot.
 - `--port N`: local TCP port used by `adb forward` (default: `34567`).
 
 Use `-s SERIAL` before the command to select a device when several are connected.
+
+### Wi-Fi notes
+
+Android's _Wireless debugging_ changes port and may turn itself off when the
+phone sleeps (notably on Xiaomi/HyperOS). That is why this client uses a fixed
+port instead: `adb tcpip 5555` over USB, then `--connect PHONE_IP`. The fixed
+port lasts until the phone reboots.
+
+For a stable connection: reserve the phone's IP address in your router (static
+DHCP lease), prefer 5 GHz Wi-Fi, keep the phone charging, and disable battery
+restrictions for the Audio Source app.
 
 ## Installation
 
