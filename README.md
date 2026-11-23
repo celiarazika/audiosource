@@ -15,6 +15,41 @@ through ADB, so you can use your Android device as a USB microphone.
     `PATH`).
   - Python 3 (requires `python3` in `PATH`).
 
+## Windows
+
+The `audiosource.py` client works on Windows. It plays the phone's microphone
+audio into a virtual audio cable, which Windows applications can then use as a
+microphone.
+
+Requirements:
+
+- Android SDK Platform Tools (`adb.exe` in `PATH`).
+- [VB-CABLE](https://vb-audio.com/Cable/) (free virtual audio cable).
+- Python 3, then `pip install sounddevice numpy`.
+
+Usage (phone connected by USB with USB debugging enabled, and the Audio Source
+app installed as described below):
+
+```powershell
+python audiosource.py devices
+python audiosource.py run
+```
+
+Then, in Windows sound settings, set **CABLE Output** as the input (microphone)
+device of the application you want to use.
+
+Options for `run`:
+
+- `--device NAME`: output device name substring (default: `CABLE Input`).
+- `--gain 2.0`: volume multiplier if the sound is too low.
+- `--latency low|high|MS`: output buffer (default: `low`). Raise it, for
+  example `--latency 60`, if the sound crackles over Wi-Fi.
+- `--hostapi WASAPI|DirectSound|MME`: force a Windows audio API. By default the
+  lowest-latency one (WASAPI) is tried first, then the others.
+- `--port N`: local TCP port used by `adb forward` (default: `34567`).
+
+Use `-s SERIAL` before the command to select a device when several are connected.
+
 ## Installation
 
 [<img src="assets/badge_fdroid.png"
